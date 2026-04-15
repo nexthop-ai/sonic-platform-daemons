@@ -53,9 +53,14 @@ try:
     try:
         from sonic_py_common import is_liquid_cooled
     except ImportError:
-        # Fall back to liquid-cooled (safe default — full monitoring enabled)
+        # FIXME: The cooling type should come from the Chassis object or SwitchHost Module,
+        # not from platform_env.conf. platform_env.conf describes the BMC card itself,
+        # which is the same hardware in both liquid-cooled and air-cooled chassis.
+        # Until this is fixed via a Chassis API (e.g., chassis.get_cooling_type()),
+        # default to non-liquid-cooled to avoid incorrect startup behavior.
+        # See discussion: [Add reference to team discussion/ticket if available]
         def is_liquid_cooled():
-            return True
+            return False
 
     if os.getenv("BMCCTLD_UNIT_TESTING") == "1":
         from tests import mock_swsscommon as swsscommon
@@ -318,7 +323,7 @@ class SwitchHostController(EventLogger):
             modules = self.chassis.get_all_modules()
             for mod in modules:
                 mod_type = try_get(mod.get_type, default="")
-                if mod_type in ("SWITCH_HOST", "switch_host"):
+                if mod_type in ("SWITCH-HOST", "switch-host"):
                     self._switch_host_module = mod
                     return self._switch_host_module
             if modules and len(modules) >= 2:
@@ -745,6 +750,16 @@ class BmcEventHandler(EventLogger):
     def run_event_loop(self):
         """Block in select loop until stop_event is set."""
         self.log_info("Entering event subscription loop")
+
+        # Create map of subscriber tables using getFd() for matching
+        subscriber_map = {
+            self.rack_mgr_cmd_sub.getFd(): self.rack_mgr_cmd_sub,
+            self.chassis_module_sub.getFd(): self.chassis_module_sub,
+            self.rack_mgr_alert_sub.getFd(): self.rack_mgr_alert_sub,
+            self.system_leak_sub.getFd(): self.system_leak_sub,
+            self.power_on_delay_sub.getFd(): self.power_on_delay_sub,
+        }
+
         while not self.stop_event.is_set():
             state, selectable = self.sel.select(SELECT_TIMEOUT_MSECS)
             if state == swsscommon.Select.TIMEOUT:
@@ -752,10 +767,18 @@ class BmcEventHandler(EventLogger):
             if state != swsscommon.Select.OBJECT:
                 self.log_warning("sel.select() returned unexpected state: {}".format(state))
                 continue
-            key, op, fvs = selectable.pop()
+
+            # Find the actual SubscriberStateTable that matches this selectable by file descriptor
+            table = subscriber_map.get(selectable.getFd())
+            if not table:
+                self.log_warning("Received event from unknown selectable (fd={})".format(
+                    selectable.getFd() if hasattr(selectable, 'getFd') else 'N/A'))
+                continue
+
+            key, op, fvs = table.pop()
             if op != "SET":
                 continue
-            handler = self._sub_handlers.get(id(selectable))
+            handler = self._sub_handlers.get(id(table))
             if handler:
                 handler(key, fvs_to_dict(fvs))
 
