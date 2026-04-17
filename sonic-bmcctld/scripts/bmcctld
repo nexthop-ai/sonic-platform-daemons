@@ -158,6 +158,7 @@ SYSTEM_LEAK_STATUS_TABLE = "SYSTEM_LEAK_STATUS"
 SYSTEM_LEAK_STATUS_KEY = "system"
 RACK_MANAGER_COMMAND_TABLE = "RACK_MANAGER_COMMAND"
 RACK_MANAGER_ALERT_TABLE = "RACK_MANAGER_ALERT"
+BMC_HOST_REQUEST_TABLE = "BMC_HOST_REQUEST"
 
 # Field names
 FIELD_POWER_ON_DELAY = "power_on_delay"
@@ -728,6 +729,8 @@ class BmcEventHandler(EventLogger):
             self.state_db, SYSTEM_LEAK_STATUS_TABLE)
         self.power_on_delay_sub = swsscommon.SubscriberStateTable(
             self.config_db, SWITCH_HOST_POWER_ON_DELAY_TABLE)
+        self.bmc_host_request_sub = swsscommon.SubscriberStateTable(
+            self.state_db, BMC_HOST_REQUEST_TABLE)
 
         # Map each subscriber to its handler
         self._sub_handlers = {
@@ -736,6 +739,7 @@ class BmcEventHandler(EventLogger):
             id(self.rack_mgr_alert_sub): self._handle_rack_mgr_alert,
             id(self.system_leak_sub): self._handle_system_leak,
             id(self.power_on_delay_sub): self._handle_power_on_delay_change,
+            id(self.bmc_host_request_sub): self._handle_bmc_host_request,
         }
 
         self.sel = swsscommon.Select()
@@ -744,6 +748,7 @@ class BmcEventHandler(EventLogger):
         self.sel.addSelectable(self.rack_mgr_alert_sub)
         self.sel.addSelectable(self.system_leak_sub)
         self.sel.addSelectable(self.power_on_delay_sub)
+        self.sel.addSelectable(self.bmc_host_request_sub)
 
     # ---- public ----
 
@@ -758,6 +763,7 @@ class BmcEventHandler(EventLogger):
             self.rack_mgr_alert_sub.getFd(): self.rack_mgr_alert_sub,
             self.system_leak_sub.getFd(): self.system_leak_sub,
             self.power_on_delay_sub.getFd(): self.power_on_delay_sub,
+            self.bmc_host_request_sub.getFd(): self.bmc_host_request_sub,
         }
 
         while not self.stop_event.is_set():
@@ -822,6 +828,46 @@ class BmcEventHandler(EventLogger):
         self.action_queue.put(ActionItem(action_map[command],
                                          "RACK_MGR_CMD:{}".format(command),
                                          on_complete))
+
+    def _handle_bmc_host_request(self, key, fvs):
+        """Process BMC_HOST_REQUEST from Redfish D-Bus bridge."""
+        transition = fvs.get("requested_transition", "")
+        status = fvs.get("status", "")
+
+        if status != "pending":
+            return
+
+        self.log_notice("BMC_HOST_REQUEST: transition={} status={}".format(transition, status))
+
+        # Map Redfish transitions to bmcctld actions
+        transition_map = {
+            "reset-out": ACTION_POWER_ON,
+            "reset-in": ACTION_POWER_OFF,
+            "reset-cycle": ACTION_POWER_CYCLE,
+        }
+
+        action = transition_map.get(transition)
+        if not action:
+            self.log_warning("Unknown BMC_HOST_REQUEST transition: {}".format(transition))
+            self._set_bmc_request_status(key, "failed", "UNKNOWN_TRANSITION")
+            return
+
+        if action == ACTION_POWER_ON:
+            if self.critical_event_checker.has_any_critical_event():
+                self.log_warning("POWER_ON blocked by BMC_HOST_REQUEST: active critical leak or alert")
+                self._set_bmc_request_status(key, "failed", "CRITICAL_EVENT_PRESENT")
+                return
+
+        # Mark as in-progress
+        self._set_bmc_request_status(key, "in-progress", "")
+
+        def on_complete(success, req_key=key):
+            self._set_bmc_request_status(req_key,
+                                         "done" if success else "failed",
+                                         "SUCCESS" if success else "ERROR")
+
+        self.log_notice("BMC_HOST_REQUEST: queuing action {} for transition {}".format(action, transition))
+        self.action_queue.put(ActionItem(action, "BMC_HOST_REQUEST:{}".format(transition), on_complete))
 
     def _handle_chassis_module(self, key, fvs):
         """Process CHASSIS_MODULE admin_status change (admin up/down from CLI)."""
@@ -979,6 +1025,16 @@ class BmcEventHandler(EventLogger):
             (FIELD_LAST_CHANGE_TIMESTAMP, get_current_timestamp()),
         ])
         tbl.set(cmd_id, fvs)
+
+    def _set_bmc_request_status(self, req_id, status, result=""):
+        """Update BMC_HOST_REQUEST entry with execution status."""
+        tbl = swsscommon.Table(self.state_db, BMC_HOST_REQUEST_TABLE)
+        fvs = swsscommon.FieldValuePairs([
+            ("status", status),
+            ("result", result),
+            (FIELD_LAST_CHANGE_TIMESTAMP, get_current_timestamp()),
+        ])
+        tbl.set(req_id, fvs)
 
 
 # ============================================================
