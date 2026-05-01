@@ -3461,8 +3461,14 @@ class TestXcvrdScript(object):
         assert common.get_cmis_state_from_state_db('Ethernet0', mock_get_status_sw_tbl) == CMIS_STATE_DP_DEINIT
 
     @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')
+<<<<<<< HEAD
     @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=False))
     def test_CmisManagerTask_dp_deinit_low_pwr_deinits_and_disables_all_lanes(self, mock_get_status_sw_tbl):
+=======
+    @patch('xcvrd.xcvrd.platform_chassis')
+    @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=False))
+    def test_CmisManagerTask_dp_deinit_low_pwr_deinits_and_disables_all_lanes(self, mock_chassis, mock_get_status_sw_tbl):
+>>>>>>> 41d8656 (NOS-5727: Deinit all lanes when module is ModuleLowPwr (#167))
         """In ModuleLowPwr (first power-up), set_datapath_deinit must use max_host_lanes_mask, not the
         breakout subport's host_lanes_mask, because DPDeinitLanes is 0x00 after module reset. Similarly, we
         should disable all tx output since OutputDisableTx = 0x0 after module reset."""
@@ -3481,11 +3487,19 @@ class TestXcvrdScript(object):
         mock_sfp = MagicMock()
         mock_sfp.get_presence = MagicMock(return_value=True)
         mock_sfp.get_xcvr_api = MagicMock(return_value=mock_xcvr_api)
+<<<<<<< HEAD
+=======
+        mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
+>>>>>>> 41d8656 (NOS-5727: Deinit all lanes when module is ModuleLowPwr (#167))
 
         port_mapping = PortMapping()
         port_mapping.handle_port_change_event(PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_ADD))
         stop_event = threading.Event()
+<<<<<<< HEAD
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, {1: mock_sfp}, stop_event)
+=======
+        task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event, platform_chassis=mock_chassis)
+>>>>>>> 41d8656 (NOS-5727: Deinit all lanes when module is ModuleLowPwr (#167))
         task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
         task.xcvr_table_helper.get_status_sw_tbl.return_value = mock_get_status_sw_tbl
 
@@ -3501,10 +3515,16 @@ class TestXcvrdScript(object):
         task.port_dict['Ethernet0']['appl'] = 2
         task.port_dict['Ethernet0']['host_lanes_mask'] = 0x0f       # breakout subport: 4 of 8 lanes
         task.port_dict['Ethernet0']['max_host_lanes_mask'] = 0xff   # QSFP-DD: all 8 lanes
+<<<<<<< HEAD
         task.port_dict['Ethernet0']['max_media_lanes_mask'] = 0xff
         task.port_dict['Ethernet0']['media_lanes_mask'] = 0x0f
 
         task.process_single_lport('Ethernet0', task.port_dict['Ethernet0'])
+=======
+        task.port_dict['Ethernet0']['media_lanes_mask'] = 0x0f
+
+        task.process_single_lport('Ethernet0', task.port_dict['Ethernet0'], {})
+>>>>>>> 41d8656 (NOS-5727: Deinit all lanes when module is ModuleLowPwr (#167))
 
         # Must ensure the DPDeinitLanes and OutputDisableTx registers are set
         mock_xcvr_api.set_datapath_deinit.assert_called_once_with(0xff)
