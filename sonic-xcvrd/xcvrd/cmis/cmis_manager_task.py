@@ -1027,16 +1027,20 @@ class CmisManagerTask(threading.Thread):
         """
         port_info = self.port_dict[lport]
         api = port_info.get('api')
+        retries = port_info.get('cmis_retries', 0)
         host_lanes_mask = port_info.get('host_lanes_mask', 0)
         media_lanes_mask = port_info['media_lanes_mask']
-        retries = port_info.get('cmis_retries', 0)
+        if self.check_module_state(api, ['ModuleLowPwr']):
+            self.log_notice("{}: deinit all datapaths and disable all Tx output for first module power up".format(lport))
+            host_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
+            media_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
 
         # D.2.2 Software Deinitialization
         api.set_datapath_deinit(host_lanes_mask)
 
         # D.1.3 Software Configuration and Initialization
         if not api.tx_disable_channel(media_lanes_mask, True):
-            self.log_notice("{}: unable to turn off tx power with host_lanes_mask {}".format(lport, host_lanes_mask))
+            self.log_notice("{}: unable to turn off tx power with host_lanes_mask {} media_lanes_mask {}".format(lport, host_lanes_mask, media_lanes_mask))
             self.port_dict[lport]['cmis_retries'] = retries + 1
             return False
 

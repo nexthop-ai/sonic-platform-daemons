@@ -3346,6 +3346,57 @@ class TestXcvrdScript(object):
         # Verify we moved to DP_DEINIT state (the state machine continues despite tx power config failure)
         assert common.get_cmis_state_from_state_db('Ethernet0', mock_get_status_sw_tbl) == CMIS_STATE_DP_DEINIT
 
+    @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')
+    @patch('xcvrd.xcvrd.platform_chassis')
+    @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=False))
+    def test_CmisManagerTask_dp_deinit_low_pwr_deinits_and_disables_all_lanes(self, mock_chassis, mock_get_status_sw_tbl):
+        """In ModuleLowPwr (first power-up), set_datapath_deinit must use max_host_lanes_mask, not the
+        breakout subport's host_lanes_mask, because DPDeinitLanes is 0x00 after module reset. Similarly, we
+        should disable all tx output since OutputDisableTx = 0x0 after module reset."""
+        mock_get_status_sw_tbl = Table("STATE_DB", TRANSCEIVER_STATUS_SW_TABLE)
+
+        mock_xcvr_api = MagicMock()
+        mock_xcvr_api.is_flat_memory = MagicMock(return_value=False)
+        mock_xcvr_api.is_coherent_module = MagicMock(return_value=False)
+        mock_xcvr_api.get_module_type_abbreviation = MagicMock(return_value='QSFP-DD')
+        mock_xcvr_api.get_module_state = MagicMock(return_value='ModuleLowPwr')
+        mock_xcvr_api.tx_disable_channel = MagicMock(return_value=True)
+        mock_xcvr_api.set_lpmode = MagicMock(return_value=True)
+        mock_xcvr_api.get_datapath_deinit_duration = MagicMock(return_value=0)
+        mock_xcvr_api.get_module_pwr_up_duration = MagicMock(return_value=0)
+
+        mock_sfp = MagicMock()
+        mock_sfp.get_presence = MagicMock(return_value=True)
+        mock_sfp.get_xcvr_api = MagicMock(return_value=mock_xcvr_api)
+        mock_chassis.get_sfp = MagicMock(return_value=mock_sfp)
+
+        port_mapping = PortMapping()
+        port_mapping.handle_port_change_event(PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_ADD))
+        stop_event = threading.Event()
+        task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event, platform_chassis=mock_chassis)
+        task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+        task.xcvr_table_helper.get_status_sw_tbl.return_value = mock_get_status_sw_tbl
+
+        # Simulate a 2x200G breakout: subport 1 owns lanes 1-4 (host_lanes_mask=0x0f, media_lanes_mask=0x0f)
+        port_change_event = PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_SET,
+                                            {'speed': '200000', 'lanes': '1,2,3,4', 'subport': '1'})
+        task.on_port_update_event(port_change_event)
+
+        # Jump straight to DP_DEINIT with pre-computed masks
+        task.update_port_transceiver_status_table_sw_cmis_state('Ethernet0', CMIS_STATE_DP_DEINIT)
+        task.port_dict['Ethernet0']['host_tx_ready'] = 'true'
+        task.port_dict['Ethernet0']['admin_status'] = 'up'
+        task.port_dict['Ethernet0']['appl'] = 2
+        task.port_dict['Ethernet0']['host_lanes_mask'] = 0x0f       # breakout subport: 4 of 8 lanes
+        task.port_dict['Ethernet0']['max_host_lanes_mask'] = 0xff   # QSFP-DD: all 8 lanes
+        task.port_dict['Ethernet0']['media_lanes_mask'] = 0x0f
+
+        task.process_single_lport('Ethernet0', task.port_dict['Ethernet0'], {})
+
+        # Must ensure the DPDeinitLanes and OutputDisableTx registers are set
+        mock_xcvr_api.set_datapath_deinit.assert_called_once_with(0xff)
+        mock_xcvr_api.tx_disable_channel.assert_called_once_with(0xff, True)
+
     @patch('xcvrd.xcvrd.platform_chassis')
     @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=(False)))
     @patch('xcvrd.cmis.cmis_manager_task.PortChangeObserver', MagicMock(handle_port_update_event=MagicMock()))
