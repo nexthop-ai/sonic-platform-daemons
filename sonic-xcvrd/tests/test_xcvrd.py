@@ -3389,6 +3389,7 @@ class TestXcvrdScript(object):
         task.port_dict['Ethernet0']['appl'] = 2
         task.port_dict['Ethernet0']['host_lanes_mask'] = 0x0f       # breakout subport: 4 of 8 lanes
         task.port_dict['Ethernet0']['max_host_lanes_mask'] = 0xff   # QSFP-DD: all 8 lanes
+        task.port_dict['Ethernet0']['max_media_lanes_mask'] = 0xff
         task.port_dict['Ethernet0']['media_lanes_mask'] = 0x0f
 
         task.process_single_lport('Ethernet0', task.port_dict['Ethernet0'])

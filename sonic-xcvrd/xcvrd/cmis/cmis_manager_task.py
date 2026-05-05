@@ -888,6 +888,7 @@ class CmisManagerTask(threading.Thread):
         self.port_dict[lport]['media_lane_assignment_options'] = int(api.get_media_lane_assignment_option(appl))
         media_lane_count = self.port_dict[lport]['media_lane_count']
         media_lane_assignment_options = self.port_dict[lport]['media_lane_assignment_options']
+        self.port_dict[lport]['max_media_lanes_mask'] = self.port_dict[lport]['max_host_lanes_mask']
         self.port_dict[lport]['media_lanes_mask'] = self.get_cmis_media_lanes_mask(api,
                                                         appl, lport, subport)
         if self.port_dict[lport]['media_lanes_mask'] <= 0:
@@ -906,9 +907,9 @@ class CmisManagerTask(threading.Thread):
             # Set all the DP lanes AppSel to unused(0) when non default app code needs to be configured
             self.port_dict[lport]['appl'] = appl = 0
             self.port_dict[lport]['host_lanes_mask'] = self.port_dict[lport]['max_host_lanes_mask']
-            self.port_dict[lport]['media_lanes_mask'] = self.port_dict[lport]['max_host_lanes_mask']
+            self.port_dict[lport]['media_lanes_mask'] = self.port_dict[lport]['max_media_lanes_mask']
             self.log_notice("{}: DECOMMISSION: setting appl={} and "
-                            "host_lanes_mask/media_lanes_mask={:#x}".format(lport, appl, self.port_dict[lport]['max_host_lanes_mask']))
+                            "host_lanes_mask={:#x},media_lanes_mask={:#x}".format(lport, appl, self.port_dict[lport]['max_host_lanes_mask'], self.port_dict[lport]['max_media_lanes_mask']))
             # Skip rest of the deinit/pre-init when this is the lead logical port for decommission
             self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_DP_DEINIT)
             return False
@@ -1028,19 +1029,21 @@ class CmisManagerTask(threading.Thread):
         port_info = self.port_dict[lport]
         api = port_info.get('api')
         retries = port_info.get('cmis_retries', 0)
-        host_lanes_mask = port_info.get('host_lanes_mask', 0)
-        media_lanes_mask = port_info['media_lanes_mask']
+        deinit_host_lanes_mask = port_info.get('host_lanes_mask', 0)
+        disable_media_lanes_mask = port_info['media_lanes_mask']
+        # Deinit and disable all lanes if we are in ModuleLowPwr to avoid unintentional 
+        # initialization of other datapaths during transition to ModuleReady 
         if self.check_module_state(api, ['ModuleLowPwr']):
             self.log_notice("{}: deinit all datapaths and disable all Tx output for first module power up".format(lport))
-            host_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
-            media_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
+            deinit_host_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
+            disable_media_lanes_mask = self.port_dict[lport]['max_media_lanes_mask']
 
         # D.2.2 Software Deinitialization
-        api.set_datapath_deinit(host_lanes_mask)
+        api.set_datapath_deinit(deinit_host_lanes_mask)
 
         # D.1.3 Software Configuration and Initialization
-        if not api.tx_disable_channel(media_lanes_mask, True):
-            self.log_notice("{}: unable to turn off tx power with host_lanes_mask {} media_lanes_mask {}".format(lport, host_lanes_mask, media_lanes_mask))
+        if not api.tx_disable_channel(disable_media_lanes_mask, True):
+            self.log_notice("{}: unable to turn off tx power with host_lanes_mask {} media_lanes_mask {}".format(lport, deinit_host_lanes_mask, disable_media_lanes_mask))
             self.port_dict[lport]['cmis_retries'] = retries + 1
             return False
 
