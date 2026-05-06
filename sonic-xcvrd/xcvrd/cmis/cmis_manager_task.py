@@ -1034,7 +1034,7 @@ class CmisManagerTask(threading.Thread):
         # Deinit and disable all lanes if we are in ModuleLowPwr to avoid unintentional 
         # initialization of other datapaths during transition to ModuleReady 
         if self.check_module_state(api, ['ModuleLowPwr']):
-            self.log_notice("{}: deinit all datapaths and disable all Tx output for first module power up".format(lport))
+            self.log_notice("{}: ModuleLowPwr detected, set datapath deinit and disable Tx output for all lanes".format(lport))
             deinit_host_lanes_mask = self.port_dict[lport]['max_host_lanes_mask']
             disable_media_lanes_mask = self.port_dict[lport]['max_media_lanes_mask']
 
