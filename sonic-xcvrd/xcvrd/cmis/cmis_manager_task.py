@@ -121,7 +121,8 @@ class CmisManagerTask(threading.Thread):
         if port_change_event.event_type == port_change_event.PORT_SET:
             if lport not in self.port_dict:
                 self.port_dict[lport] = {"asic_id": port_change_event.asic_id,
-                                         "forced_tx_disabled": False}
+                                         "forced_tx_disabled": False,
+                                         "dp_settle_deadline": None}
             if pport >= 0:
                 self.port_dict[lport]['index'] = pport
             if 'speed' in port_change_event.port_dict and port_change_event.port_dict['speed'] != 'N/A':
@@ -582,6 +583,7 @@ class CmisManagerTask(threading.Thread):
         self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_INSERTED)
         self.port_dict[lport]['cmis_retries'] = retries
         self.port_dict[lport]['cmis_expired'] = None # No expiration
+        self.port_dict[lport]['dp_settle_deadline'] = None
 
     def check_module_state(self, api, states):
         """
@@ -845,6 +847,54 @@ class CmisManagerTask(threading.Thread):
 
         return expired_time <= current_time
 
+    def get_transient_datapath_state(self, api):
+        """
+        If any datapath lane is in a transient state (DataPathDeinit or
+        DataPathInit, transitioning to DataPathDeactivated or DataPathInitialized),
+        returns that transient state name. Otherwise returns None.
+        """
+        transient = ('DataPathDeinit', 'DataPathInit')
+        try:
+            dp_state = api.get_datapath_state() or {}
+        except Exception:
+            return None
+        for s in dp_state.values():
+            if s in transient:
+                return s
+        return None
+
+    def should_wait_for_dp_settle(self, lport, api):
+        """
+        One-shot wait at INSERTED entry: if the module is mid-transition (e.g.,
+        xcvrd restart caught it during DpInit/DpDeinit), wait for it to reach a
+        terminal datapath state before reconfiguring.
+
+        Returns True while the caller should return from the state handler
+        (still waiting, or timeout triggered force_cmis_reinit). Returns False
+        once the datapath has settled or no wait is needed.
+        """
+        transient_state = self.get_transient_datapath_state(api)
+        if transient_state is None:
+            self.port_dict[lport]['dp_settle_deadline'] = None
+            return False
+
+        deadline = self.port_dict[lport].get('dp_settle_deadline')
+        if deadline is None:
+            if transient_state == 'DataPathDeinit':
+                duration = self.get_cmis_dp_deinit_duration_secs(api)
+            else:  # DataPathInit
+                duration = self.get_cmis_dp_init_duration_secs(api)
+            self.port_dict[lport]['dp_settle_deadline'] = time.time() + duration
+            self.log_notice("{}: waiting up to {}s for datapath to settle (DP state={})".format(
+                lport, duration, api.get_datapath_state()))
+            return True
+        if time.time() < deadline:
+            return True
+        self.log_notice("{}: timeout waiting for datapath to settle, forcing CMIS reinit".format(lport))
+        retries = self.port_dict[lport].get('cmis_retries', 0)
+        self.force_cmis_reinit(lport, retries + 1)
+        return True
+
     def handle_cmis_inserted_state(self, lport):
         """
         Handle the CMIS_STATE_INSERTED state for a logical port.
@@ -858,6 +908,10 @@ class CmisManagerTask(threading.Thread):
         """
         port_info = self.port_dict[lport]
         api = port_info.get('api')
+
+        if self.should_wait_for_dp_settle(lport, api):
+            return False
+
         host_lane_count = port_info.get('host_lane_count')
         speed = port_info.get('speed')
         subport = port_info.get('subport')

@@ -4138,6 +4138,29 @@ class TestXcvrdScript(object):
         # Assert the result matches the expected output
         assert result == expected_result
 
+    def test_CmisManagerTask_handle_cmis_inserted_state_waits_for_dp_settle(self):
+        """When mid-transition, handle_cmis_inserted_state short-circuits and
+        on_port_update_event seeds dp_settle_deadline=None."""
+        port_mapping = PortMapping()
+        stop_event = threading.Event()
+        task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event, platform_chassis=MagicMock())
+
+        port_change_event = PortChangeEvent(
+            'Ethernet0', 1, 0, PortChangeEvent.PORT_SET,
+            {'speed': '400000', 'lanes': '1,2,3,4,5,6,7,8'})
+        task.on_port_update_event(port_change_event)
+        assert task.port_dict['Ethernet0']['dp_settle_deadline'] is None
+
+        api = MagicMock()
+        task.port_dict['Ethernet0']['api'] = api
+        task.should_wait_for_dp_settle = MagicMock(return_value=True)
+        task.get_cmis_max_host_lanes_mask = MagicMock()
+
+        assert task.handle_cmis_inserted_state('Ethernet0') is False
+        task.should_wait_for_dp_settle.assert_called_once_with('Ethernet0', api)
+        # Must not have advanced into the app/host-lane configuration path
+        task.get_cmis_max_host_lanes_mask.assert_not_called()
+
     @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')
     @patch('xcvrd.xcvrd.platform_chassis')
     @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=(False)))
