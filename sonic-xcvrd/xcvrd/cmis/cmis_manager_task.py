@@ -886,7 +886,7 @@ class CmisManagerTask(threading.Thread):
                 duration = self.get_cmis_dp_init_duration_secs(api)
             self.port_dict[lport]['dp_settle_deadline'] = time.time() + duration
             self.log_notice("{}: waiting up to {}s for datapath to settle (DP state={})".format(
-                lport, duration, api.get_datapath_state()))
+                lport, duration, transient_state))
             return True
         if time.time() < deadline:
             return True
