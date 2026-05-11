@@ -4139,8 +4139,9 @@ class TestXcvrdScript(object):
         assert result == expected_result
 
     def test_CmisManagerTask_handle_cmis_inserted_state_waits_for_dp_settle(self):
-        """When mid-transition, handle_cmis_inserted_state short-circuits and
-        on_port_update_event seeds dp_settle_deadline=None."""
+        """When mid-transition on this lport's lanes, handle_cmis_inserted_state
+        short-circuits after computing host_lanes_mask/media_lanes_mask and
+        gates the rest of the state on should_wait_for_dp_settle."""
         port_mapping = PortMapping()
         stop_event = threading.Event()
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event, platform_chassis=MagicMock())
@@ -4151,40 +4152,61 @@ class TestXcvrdScript(object):
         task.on_port_update_event(port_change_event)
         assert task.port_dict['Ethernet0']['dp_settle_deadline'] is None
 
+        # Seed fields the inserted-state handler reads before the wait check.
         api = MagicMock()
         task.port_dict['Ethernet0']['api'] = api
-        task.should_wait_for_dp_settle = MagicMock(return_value=True)
-        task.get_cmis_max_host_lanes_mask = MagicMock()
+        task.port_dict['Ethernet0']['host_lane_count'] = 8
+        task.port_dict['Ethernet0']['subport'] = 0
 
-        assert task.handle_cmis_inserted_state('Ethernet0') is False
-        task.should_wait_for_dp_settle.assert_called_once_with('Ethernet0', api)
-        # Must not have advanced into the app/host-lane configuration path
-        task.get_cmis_max_host_lanes_mask.assert_not_called()
+        task.is_fast_reboot_enabled = MagicMock(return_value=False)
+        task.get_cmis_max_host_lanes_mask = MagicMock(return_value=0xff)
+        task.get_cmis_host_lanes_mask = MagicMock(return_value=0xff)
+        task.get_cmis_media_lanes_mask = MagicMock(return_value=0xff)
+        api.get_media_lane_count = MagicMock(return_value=8)
+        api.get_media_lane_assignment_option = MagicMock(return_value=1)
+        task.is_decommission_required = MagicMock(return_value=False)
+        task.is_decomm_lead_lport = MagicMock(return_value=False)
+        task.is_decomm_pending = MagicMock(return_value=False)
+        task.should_wait_for_dp_settle = MagicMock(return_value=True)
+
+        with patch('xcvrd.cmis.cmis_manager_task.common.get_cmis_application_desired',
+                   MagicMock(return_value=1)):
+            assert task.handle_cmis_inserted_state('Ethernet0') is False
+
+        task.should_wait_for_dp_settle.assert_called_once_with('Ethernet0', api, 0xff)
 
     def test_CmisManagerTask_get_transient_datapath_state(self):
         port_mapping = PortMapping()
         stop_event = threading.Event()
         task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, stop_event, platform_chassis=MagicMock())
 
-        # No transient state: returns None
+        # No transient state on lanes in mask: returns None
         api = MagicMock()
         api.get_datapath_state = MagicMock(return_value={
             'DP1State': 'DataPathDeactivated', 'DP2State': 'DataPathActivated'})
-        assert task.get_transient_datapath_state(api) is None
+        assert task.get_transient_datapath_state(api, 0x03) is None
 
-        # DataPathDeinit found
+        # DataPathDeinit found on a lane in mask
         api.get_datapath_state = MagicMock(return_value={
             'DP1State': 'DataPathDeactivated', 'DP2State': 'DataPathDeinit'})
-        assert task.get_transient_datapath_state(api) == 'DataPathDeinit'
+        assert task.get_transient_datapath_state(api, 0x03) == 'DataPathDeinit'
 
-        # DataPathInit found
+        # DataPathInit found on a lane in mask
         api.get_datapath_state = MagicMock(return_value={
             'DP1State': 'DataPathInit', 'DP2State': 'DataPathDeactivated'})
-        assert task.get_transient_datapath_state(api) == 'DataPathInit'
+        assert task.get_transient_datapath_state(api, 0x03) == 'DataPathInit'
+
+        # Transient on a lane outside the mask is ignored (unrelated breakout sibling)
+        api.get_datapath_state = MagicMock(return_value={
+            'DP1State': 'DataPathActivated', 'DP2State': 'DataPathActivated',
+            'DP5State': 'DataPathDeinit', 'DP6State': 'DataPathInit'})
+        assert task.get_transient_datapath_state(api, 0x0f) is None
+        # Same state, but with the upper-lane mask: returns the transient state
+        assert task.get_transient_datapath_state(api, 0xf0) == 'DataPathDeinit'
 
         # Exception from api.get_datapath_state: returns None
         api.get_datapath_state = MagicMock(side_effect=Exception('boom'))
-        assert task.get_transient_datapath_state(api) is None
+        assert task.get_transient_datapath_state(api, 0xff) is None
 
     def test_CmisManagerTask_should_wait_for_dp_settle(self):
         port_mapping = PortMapping()
@@ -4193,19 +4215,21 @@ class TestXcvrdScript(object):
         task.port_dict['Ethernet0'] = {'dp_settle_deadline': None}
         api = MagicMock()
         api.get_datapath_state = MagicMock(return_value={'DP1State': 'DataPathActivated'})
+        host_lanes_mask = 0x0f
 
         # Not transient: clears deadline and returns False
         task.port_dict['Ethernet0']['dp_settle_deadline'] = 12345.0
         task.get_transient_datapath_state = MagicMock(return_value=None)
-        assert task.should_wait_for_dp_settle('Ethernet0', api) is False
+        assert task.should_wait_for_dp_settle('Ethernet0', api, host_lanes_mask) is False
         assert task.port_dict['Ethernet0']['dp_settle_deadline'] is None
+        task.get_transient_datapath_state.assert_called_once_with(api, host_lanes_mask)
 
         # First call with DataPathDeinit: sets deadline using deinit duration, returns True
         task.get_transient_datapath_state = MagicMock(return_value='DataPathDeinit')
         task.get_cmis_dp_deinit_duration_secs = MagicMock(return_value=600)
         task.get_cmis_dp_init_duration_secs = MagicMock(return_value=60)
         with patch('xcvrd.cmis.cmis_manager_task.time.time', return_value=1000.0):
-            assert task.should_wait_for_dp_settle('Ethernet0', api) is True
+            assert task.should_wait_for_dp_settle('Ethernet0', api, host_lanes_mask) is True
         assert task.port_dict['Ethernet0']['dp_settle_deadline'] == 1600.0
         task.get_cmis_dp_deinit_duration_secs.assert_called_once_with(api)
 
@@ -4215,7 +4239,7 @@ class TestXcvrdScript(object):
         task.get_cmis_dp_deinit_duration_secs = MagicMock(return_value=600)
         task.get_cmis_dp_init_duration_secs = MagicMock(return_value=60)
         with patch('xcvrd.cmis.cmis_manager_task.time.time', return_value=2000.0):
-            assert task.should_wait_for_dp_settle('Ethernet0', api) is True
+            assert task.should_wait_for_dp_settle('Ethernet0', api, host_lanes_mask) is True
         assert task.port_dict['Ethernet0']['dp_settle_deadline'] == 2060.0
         task.get_cmis_dp_init_duration_secs.assert_called_once_with(api)
 
@@ -4224,7 +4248,7 @@ class TestXcvrdScript(object):
         task.get_transient_datapath_state = MagicMock(return_value='DataPathInit')
         task.force_cmis_reinit = MagicMock()
         with patch('xcvrd.cmis.cmis_manager_task.time.time', return_value=4999.0):
-            assert task.should_wait_for_dp_settle('Ethernet0', api) is True
+            assert task.should_wait_for_dp_settle('Ethernet0', api, host_lanes_mask) is True
         task.force_cmis_reinit.assert_not_called()
         assert task.port_dict['Ethernet0']['dp_settle_deadline'] == 5000.0
 
@@ -4234,7 +4258,7 @@ class TestXcvrdScript(object):
         task.get_transient_datapath_state = MagicMock(return_value='DataPathInit')
         task.force_cmis_reinit = MagicMock()
         with patch('xcvrd.cmis.cmis_manager_task.time.time', return_value=6000.0):
-            assert task.should_wait_for_dp_settle('Ethernet0', api) is True
+            assert task.should_wait_for_dp_settle('Ethernet0', api, host_lanes_mask) is True
         task.force_cmis_reinit.assert_called_once_with('Ethernet0', 3)
 
     @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')

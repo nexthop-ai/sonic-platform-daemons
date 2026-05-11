@@ -847,33 +847,43 @@ class CmisManagerTask(threading.Thread):
 
         return expired_time <= current_time
 
-    def get_transient_datapath_state(self, api):
+    def get_transient_datapath_state(self, api, host_lanes_mask):
         """
-        If any datapath lane is in a transient state (DataPathDeinit or
-        DataPathInit, transitioning to DataPathDeactivated or DataPathInitialized),
-        returns that transient state name. Otherwise returns None.
+        If any datapath lane owned by host_lanes_mask is in a transient state
+        (DataPathDeinit or DataPathInit, transitioning to DataPathDeactivated
+        or DataPathInitialized), returns that transient state name. Otherwise
+        returns None.
+
+        host_lanes_mask is mandatory so an unrelated breakout sibling cannot
+        block this port's CMIS initialization.
         """
         transient = ('DataPathDeinit', 'DataPathInit')
         try:
             dp_state = api.get_datapath_state() or {}
-        except Exception:
+        except Exception as e:
+            self.log_warning("Failed to read datapath state: {}".format(e))
             return None
-        for s in dp_state.values():
+
+        for lane in range(self.CMIS_MAX_HOST_LANES):
+            if ((1 << lane) & host_lanes_mask) == 0:
+                continue
+            s = dp_state.get("DP{}State".format(lane + 1))
             if s in transient:
                 return s
         return None
 
-    def should_wait_for_dp_settle(self, lport, api):
+    def should_wait_for_dp_settle(self, lport, api, host_lanes_mask):
         """
-        One-shot wait at INSERTED entry: if the module is mid-transition (e.g.,
-        xcvrd restart caught it during DpInit/DpDeinit), wait for it to reach a
-        terminal datapath state before reconfiguring.
+        One-shot wait at INSERTED entry: if the module is mid-transition on the
+        lanes owned by lport (e.g., xcvrd restart caught it during DpInit or
+        DpDeinit), wait for those lanes to reach a terminal datapath state
+        before reconfiguring.
 
         Returns True while the caller should return from the state handler
         (still waiting, or timeout triggered force_cmis_reinit). Returns False
         once the datapath has settled or no wait is needed.
         """
-        transient_state = self.get_transient_datapath_state(api)
+        transient_state = self.get_transient_datapath_state(api, host_lanes_mask)
         if transient_state is None:
             self.port_dict[lport]['dp_settle_deadline'] = None
             return False
@@ -908,9 +918,6 @@ class CmisManagerTask(threading.Thread):
         """
         port_info = self.port_dict[lport]
         api = port_info.get('api')
-
-        if self.should_wait_for_dp_settle(lport, api):
-            return False
 
         host_lane_count = port_info.get('host_lane_count')
         speed = port_info.get('speed')
@@ -952,6 +959,13 @@ class CmisManagerTask(threading.Thread):
             return False
         media_lanes_mask = self.port_dict[lport]['media_lanes_mask']
         self.log_notice("{}: Setting media_lanemask=0x{:x}".format(lport, media_lanes_mask))
+
+        # Once the lanes owned by this lport are known, gate on a one-shot
+        # wait for any transient DP state on those lanes (e.g. xcvrd restart
+        # caught the module mid DpInit/DpDeinit). This keeps unrelated breakout
+        # siblings from blocking this port.
+        if self.should_wait_for_dp_settle(lport, api, host_lanes_mask):
+            return False
 
         if self.is_decommission_required(api, lport):
             self.set_decomm_pending(lport)
