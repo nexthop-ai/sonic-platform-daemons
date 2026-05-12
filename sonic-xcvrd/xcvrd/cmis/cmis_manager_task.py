@@ -861,7 +861,7 @@ class CmisManagerTask(threading.Thread):
         try:
             dp_state = api.get_datapath_state() or {}
         except Exception as e:
-            self.log_warning("Failed to read datapath state: {}".format(e))
+            self.log_error("Failed to read datapath state: {}".format(e))
             return None
 
         for lane in range(self.CMIS_MAX_HOST_LANES):
