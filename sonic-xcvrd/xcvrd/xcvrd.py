@@ -30,6 +30,7 @@ try:
     from .sff_mgr import SffManagerTask
     from .dom.dom_mgr import DomThermalInfoUpdateTask, DomInfoUpdateTask
     from .cmis.cmis_manager_task import CmisManagerTask
+    from .cmis.cpo_cmis_manager_task import CpoCmisManagerTask
     from .xcvrd_utilities.xcvr_table_helper import *
     from .xcvrd_utilities import port_event_helper
     from .xcvrd_utilities.port_event_helper import PortChangeObserver
@@ -983,6 +984,34 @@ class DaemonXcvrd(daemon_base.DaemonBase):
 
         return sfp_obj_dict
 
+    def initialize_cpo_obj_dict(self, port_mapping_data):
+        """
+        Create a dictionary mapping physical ports to their corresponding co-packaged
+        optics (CPO) objects, for ports driven by CPO modules.
+
+        Args:
+            port_mapping_data (PortMapping): The port mapping data.
+
+        Returns:
+            Dict[int, CpoBase]: A dictionary mapping physical ports to CPO objects.
+            Empty if the chassis exposes no CPO ports.
+        """
+        get_cpo = getattr(platform_chassis, 'get_cpo', None)
+        if get_cpo is None or port_mapping_data is None or port_mapping_data.physical_to_logical is None:
+            return {}
+
+        cpo_obj_dict = {}
+        for physical_port in port_mapping_data.physical_to_logical.keys():
+            try:
+                cpo = get_cpo(physical_port)
+            except Exception as e:
+                self.log_error(f"CPO OBJ INIT: Failed to get CPO object for port {physical_port} due to {repr(e)}")
+                continue
+            if cpo is not None:
+                cpo_obj_dict[physical_port] = cpo
+
+        return cpo_obj_dict
+
     def remove_stale_transceiver_info(self, port_mapping_data):
         """
         Remove stale entries from the TRANSCEIVER_INFO table for ports where the transceiver is no longer present.
@@ -1154,12 +1183,28 @@ class DaemonXcvrd(daemon_base.DaemonBase):
         else:
             self.log_notice("Skipping SFF Task Manager")
 
-        # Start the CMIS manager
+        # Start the CMIS manager(s). Each manager is given the set of transceiver
+        # objects it is responsible for at construction (indexed by physical port),
+        # so the base task and the CPO task own disjoint port sets.
         cmis_manager = None
+        cpo_cmis_manager = None
         if not self.skip_cmis_mgr:
-            cmis_manager = CmisManagerTask(self.namespaces, port_mapping_data, self.stop_event, skip_cmis_mgr=self.skip_cmis_mgr, platform_chassis=platform_chassis)
+            cpo_obj_dict = self.initialize_cpo_obj_dict(port_mapping_data)
+            # The base CMIS manager owns every non-CPO port.
+            sfp_cmis_obj_dict = {pport: obj for pport, obj in self.sfp_obj_dict.items()
+                                 if pport not in cpo_obj_dict}
+            cmis_manager = CmisManagerTask(self.namespaces, port_mapping_data, sfp_cmis_obj_dict, self.stop_event,
+                                           skip_cmis_mgr=self.skip_cmis_mgr, platform_chassis=platform_chassis)
             cmis_manager.start()
             self.threads.append(cmis_manager)
+
+            # Start a dedicated CMIS manager for co-packaged optics (CPO) ports, if
+            # the platform exposes any.
+            if cpo_obj_dict:
+                cpo_cmis_manager = CpoCmisManagerTask(self.namespaces, port_mapping_data, cpo_obj_dict, self.stop_event,
+                                                      skip_cmis_mgr=self.skip_cmis_mgr, platform_chassis=platform_chassis)
+                cpo_cmis_manager.start()
+                self.threads.append(cpo_cmis_manager)
 
         # Start the dom sensor info update thread
         dom_info_update = DomInfoUpdateTask(self.namespaces, port_mapping_data, self.sfp_obj_dict, self.stop_event, self.skip_cmis_mgr, self.dom_update_interval)
@@ -1211,6 +1256,11 @@ class DaemonXcvrd(daemon_base.DaemonBase):
         if cmis_manager is not None:
             if cmis_manager.is_alive():
                 cmis_manager.join()
+
+        # Stop the CPO CMIS manager
+        if cpo_cmis_manager is not None:
+            if cpo_cmis_manager.is_alive():
+                cpo_cmis_manager.join()
 
         # Stop the dom sensor info update thread
         if dom_info_update.is_alive():

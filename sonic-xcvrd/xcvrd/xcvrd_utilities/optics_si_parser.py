@@ -182,7 +182,12 @@ def fetch_optics_si_setting(physical_port, lane_speed, sfp):
 
     optics_si = {}
 
-    if not common._wrapper_get_presence(physical_port):
+    # Use the presence of the transceiver object passed in by the caller rather
+    # than re-resolving it through platform_chassis.get_sfp(). This keeps the
+    # check correct for non-SFP transceivers (e.g. co-packaged optics, whose
+    # object comes from platform_chassis.get_cpo()), which still expose
+    # get_presence().
+    if sfp is None or not sfp.get_presence():
         helper_logger.log_info("Module {} presence not detected during notify".format(physical_port))
         return optics_si
     vendor_key, vendor_name = get_module_vendor_key(physical_port, sfp)

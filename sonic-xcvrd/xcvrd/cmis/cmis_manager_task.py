@@ -46,7 +46,7 @@ class CmisManagerTask(threading.Thread):
     CMIS_MAX_HOST_LANES    = 8
     CMIS_EXPIRATION_BUFFER_MS = 2
 
-    def __init__(self, namespaces, port_mapping, main_thread_stop_event, skip_cmis_mgr=False, platform_chassis=None):
+    def __init__(self, namespaces, port_mapping, sfp_obj_dict, main_thread_stop_event, skip_cmis_mgr=False, platform_chassis=None):
         threading.Thread.__init__(self)
         self.name = "CmisManagerTask"
         self.exc = None
@@ -59,6 +59,11 @@ class CmisManagerTask(threading.Thread):
         self.skip_cmis_mgr = skip_cmis_mgr
         self.namespaces = namespaces
         self.platform_chassis = platform_chassis
+        # The set of transceiver objects this task is responsible for, indexed by
+        # physical port (analogous to DomInfoUpdateTask). The task processes ONLY
+        # these ports, which is how the base task and a CPO-specific subclass are
+        # given disjoint port sets.
+        self.sfp_obj_dict = sfp_obj_dict
         self.xcvr_table_helper = XcvrTableHelper(self.namespaces)
         self._is_fast_reboot_enabled = None
         # Cache of gearbox line lanes dict, refreshed once per task_worker iteration.
@@ -1242,6 +1247,22 @@ class CmisManagerTask(threading.Thread):
             common.log_exception_traceback()
             self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_FAILED)
 
+    def _resolve_transceiver_object(self, pport):
+        """
+        Return the platform transceiver object for the given physical port index.
+
+        The object is looked up in sfp_obj_dict (this task's responsibility set). The
+        caller must only invoke this for a port it owns (pport in sfp_obj_dict), so the
+        lookup always yields a valid object.
+        """
+        return self.sfp_obj_dict[pport]
+
+    def _get_api(self, xcvr):
+        """
+        Return the xcvr API object for the given transceiver object.
+        """
+        return xcvr.get_xcvr_api()
+
     def process_single_lport(self, lport, info):
         state = common.get_cmis_state_from_state_db(lport, self.xcvr_table_helper.get_status_sw_tbl(self.get_asic_id(lport)))
         if state in CMIS_TERMINAL_STATES or state == CMIS_STATE_UNKNOWN:
@@ -1265,32 +1286,25 @@ class CmisManagerTask(threading.Thread):
         if pport < 0 or speed == 0 or len(lanes) < 1 or subport < 0:
             return
 
+        # Skip ports that are not part of this task's responsibility set (e.g. a CPO
+        # port when this is the base task, or vice-versa).
+        if pport not in self.sfp_obj_dict:
+            return
+
         host_lane_count = self.get_host_lane_count(lport, lanes)
 
+        sfp = self._resolve_transceiver_object(pport)
+
         # double-check the HW presence before moving forward
-        sfp = self.platform_chassis.get_sfp(pport)
         if not sfp.get_presence():
             self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_REMOVED)
             return
 
         try:
             # Skip if XcvrApi is not supported
-            api = sfp.get_xcvr_api()
+            api = self._get_api(sfp)
             if api is None:
                 self.log_error("{}: skipping CMIS state machine since no xcvr api!!!".format(lport))
-                self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_READY)
-                return
-
-            # Skip if it's not a paged memory device
-            if api.is_flat_memory():
-                self.log_notice("{}: skipping CMIS state machine for flat memory xcvr".format(lport))
-                self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_READY)
-                return
-
-            # Skip if it's not a CMIS module
-            type = api.get_module_type_abbreviation()
-            if (type is None) or (type not in self.CMIS_MODULE_TYPES):
-                self.log_notice("{}: skipping CMIS state machine for non-CMIS module with type {}".format(lport, type))
                 self.update_port_transceiver_status_table_sw_cmis_state(lport, CMIS_STATE_READY)
                 return
 
