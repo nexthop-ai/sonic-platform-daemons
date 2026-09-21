@@ -4037,9 +4037,71 @@ class TestXcvrdScript(object):
             with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
                 helper = XcvrTableHelper(DEFAULT_NAMESPACE)
                 helper.appl_db = {0: mock_appl_db}  # Mock the appl_db dict
+                helper._is_gearbox_configured = MagicMock(return_value=True)
 
                 result = helper.get_gearbox_line_lanes_dict()
                 assert result == expected_dict
+
+    def test_XcvrTableHelper_get_gearbox_line_lanes_dict_caches_non_empty(self):
+        mock_gearbox_table = MagicMock()
+        mock_gearbox_table.getKeys.return_value = ["interface:0"]
+        mock_gearbox_table.get.return_value = (True, [("name", "Ethernet0"), ("line_lanes", "304,305")])
+
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.swsscommon.Table', return_value=mock_gearbox_table) as mock_table:
+            with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
+                helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+                helper.appl_db = {0: MagicMock()}
+                helper._is_gearbox_configured = MagicMock(return_value=True)
+                mock_table.reset_mock()
+
+                assert helper.get_gearbox_line_lanes_dict() == {"Ethernet0": 2}
+                assert helper.get_gearbox_line_lanes_dict() == {"Ethernet0": 2}
+                assert mock_table.call_count == 1
+
+    def test_XcvrTableHelper_get_gearbox_line_lanes_dict_empty_not_cached(self):
+        mock_gearbox_table = MagicMock()
+        mock_gearbox_table.getKeys.return_value = []
+
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.swsscommon.Table', return_value=mock_gearbox_table) as mock_table:
+            with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
+                helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+                helper.appl_db = {0: MagicMock()}
+                helper._is_gearbox_configured = MagicMock(return_value=True)
+                mock_table.reset_mock()
+
+                assert helper.get_gearbox_line_lanes_dict() == {}
+                assert helper.get_gearbox_line_lanes_dict() == {}
+                assert mock_table.call_count == 2
+
+    def test_XcvrTableHelper_get_gearbox_line_lanes_dict_no_gearbox_platform(self):
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.swsscommon.Table') as mock_table:
+            with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
+                helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+                helper.appl_db = {0: MagicMock()}
+                helper._is_gearbox_configured = MagicMock(return_value=False)
+                mock_table.reset_mock()
+
+                assert helper.get_gearbox_line_lanes_dict() == {}
+                assert helper.get_gearbox_line_lanes_dict() == {}
+                mock_table.assert_not_called()
+                assert helper._is_gearbox_configured.call_count == 1
+
+    @pytest.mark.parametrize("isfile, expected", [(True, True), (False, False)])
+    def test_XcvrTableHelper_is_gearbox_configured(self, isfile, expected):
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.swsscommon.Table'), \
+                patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
+            helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.device_info.get_paths_to_platform_and_hwsku_dirs',
+                   return_value=('/platform', '/hwsku')), \
+                patch('xcvrd.xcvrd_utilities.xcvr_table_helper.os.path.isfile', return_value=isfile) as mock_isfile:
+            assert helper._is_gearbox_configured() == expected
+            mock_isfile.assert_called_once_with(os.path.join('/hwsku', 'gearbox_config.json'))
+
+        with patch('xcvrd.xcvrd_utilities.xcvr_table_helper.device_info.get_paths_to_platform_and_hwsku_dirs',
+                   side_effect=Exception('boom')), \
+                patch('xcvrd.xcvrd_utilities.xcvr_table_helper.helper_logger'):
+            assert helper._is_gearbox_configured() is True
 
     @pytest.mark.parametrize("gearbox_lanes_dict, lport, port_config_lanes, expected_count", [
         # Test case 1: Gearbox data available, should use gearbox count

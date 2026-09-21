@@ -1,5 +1,12 @@
+import os
+
 try:
+<<<<<<< HEAD
     from sonic_py_common import daemon_base, logger
+=======
+    import redis
+    from sonic_py_common import daemon_base, device_info, logger
+>>>>>>> d4df62a (NOS-14848: Cache gearbox line lanes dict instead of scanning APPL_DB every second (#234))
     from sonic_py_common import multi_asic
     from swsscommon import swsscommon
 except ImportError as e:
@@ -46,9 +53,19 @@ TRANSCEIVER_VDM_HWARN_FLAG_CLEAR_TIME = 'TRANSCEIVER_VDM_HWARN_FLAG_CLEAR_TIME'
 TRANSCEIVER_VDM_LWARN_FLAG_CLEAR_TIME = 'TRANSCEIVER_VDM_LWARN_FLAG_CLEAR_TIME'
 TRANSCEIVER_PM_TABLE = 'TRANSCEIVER_PM'
 
+<<<<<<< HEAD
 NPU_SI_SETTINGS_SYNC_STATUS_KEY = 'NPU_SI_SETTINGS_SYNC_STATUS'
 NPU_SI_SETTINGS_DEFAULT_VALUE = 'NPU_SI_SETTINGS_DEFAULT'
 NPU_SI_SETTINGS_NOTIFIED_VALUE = 'NPU_SI_SETTINGS_NOTIFIED'
+=======
+GEARBOX_CONFIG_FILE = "gearbox_config.json"
+
+NPU_SI_SETTINGS_SYNC_STATUS_KEY = "NPU_SI_SETTINGS_SYNC_STATUS"
+NPU_SI_SETTINGS_DEFAULT_VALUE = "NPU_SI_SETTINGS_DEFAULT"
+NPU_SI_SETTINGS_NOTIFIED_VALUE = "NPU_SI_SETTINGS_NOTIFIED"
+
+VDM_THRESHOLD_TYPES = ["halarm", "lalarm", "hwarn", "lwarn"]
+>>>>>>> d4df62a (NOS-14848: Cache gearbox line lanes dict instead of scanning APPL_DB every second (#234))
 
 VDM_THRESHOLD_TYPES = ['halarm', 'lalarm', 'hwarn', 'lwarn']
 
@@ -59,6 +76,7 @@ class XcvrTableHelper:
         self.state_db = {}
         self.appl_db = {}
         self.cfg_db = {}
+        self._gearbox_line_lanes_dict = None
         self.dom_temperature_tbl = {}
         self.dom_flag_tbl = {}
         self.dom_flag_change_count_tbl = {}
@@ -246,6 +264,20 @@ class XcvrTableHelper:
         # If npu_si_settings_sync_val is None, it can also mean that the key is not present in the table
         return npu_si_settings_sync_val is None or npu_si_settings_sync_val == NPU_SI_SETTINGS_DEFAULT_VALUE
 
+    def _is_gearbox_configured(self):
+        """
+        Checks whether this platform has a gearbox, using the same condition
+        gearsyncd is started with: presence of gearbox_config.json in the hwsku
+        directory. Falls back to True on error so the DB is still consulted.
+        """
+        try:
+            _, hwsku_dir = device_info.get_paths_to_platform_and_hwsku_dirs()
+            return os.path.isfile(os.path.join(hwsku_dir, GEARBOX_CONFIG_FILE))
+        except Exception as e:
+            helper_logger.log_warning("Unable to detect gearbox config presence, "
+                                      "assuming configured: {}".format(str(e)))
+            return True
+
     def get_gearbox_line_lanes_dict(self):
         """
         Retrieves the gearbox line lanes dictionary from APPL_DB
@@ -254,6 +286,10 @@ class XcvrTableHelper:
         the line_lanes count for each logical port. The line_lanes represent the
         number of lanes on the line side (towards the optical module) which is the
         correct count to use for CMIS host lane configuration.
+
+        The gearbox configuration is static (gearsyncd writes it once at boot),
+        so the result is cached: platforms without a gearbox config file never
+        query the DB, and once a non-empty result is read it is reused forever.
 
         Returns:
             dict: A dictionary where:
@@ -268,6 +304,13 @@ class XcvrTableHelper:
             - Silently skips invalid or malformed entries
             - Only processes keys that start with "interface:"
         """
+        if self._gearbox_line_lanes_dict is not None:
+            return self._gearbox_line_lanes_dict
+
+        if not self._is_gearbox_configured():
+            self._gearbox_line_lanes_dict = {}
+            return self._gearbox_line_lanes_dict
+
         gearbox_line_lanes_dict = {}
         try:
             for asic_id in self.appl_db:
@@ -292,5 +335,8 @@ class XcvrTableHelper:
         except Exception as e:
             helper_logger.log_error("Error in get_gearbox_line_lanes_dict: {}".format(str(e)))
             return gearbox_line_lanes_dict
+
+        if gearbox_line_lanes_dict:
+            self._gearbox_line_lanes_dict = gearbox_line_lanes_dict
 
         return gearbox_line_lanes_dict
