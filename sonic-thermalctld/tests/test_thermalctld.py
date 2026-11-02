@@ -36,6 +36,7 @@ assert len(swsscommon.__path__) == 1
 assert(os.path.samefile(swsscommon.__path__[0], os.path.join(mocked_libs_path, 'swsscommon')))
 
 from sonic_py_common import daemon_base, device_info
+from sonic_platform_base import liquid_cooling_base
 from sonic_platform_base.liquid_cooling_base import LeakSeverity
 from datetime import datetime, timedelta
 
@@ -1189,11 +1190,59 @@ class TestLiquidCoolingUpdater(object):
         assert leak_statuses["leakage1"] == "N/A"
         assert leak_statuses["leakage2"] == "No"
 
+        sensor_statuses = {call[0][0]: call[0][1].fv_dict['leak_sensor_status'] for call in calls}
+        assert sensor_statuses["leakage1"] == "Fault"
+        assert sensor_statuses["leakage2"] == "Good"
+
         calls_sys = liquid_cooling_updater.system_table.call_args_list
         for call in calls_sys:
             scope_name, fvp = call[0]
             assert scope_name == "system"
             assert fvp.fv_dict['device_leak_status'] == 'None'
+
+    def test_refresh_leak_status_sensor_health_na(self):
+        """leak_sensor_status reports N/A health while the sensor is still treated as ok"""
+        LeakSensorHealth = getattr(liquid_cooling_base, 'LeakSensorHealth', None)
+        if LeakSensorHealth is None:
+            pytest.skip("sonic-platform-common without LeakSensorHealth")
+        mock_chassis = MockChassis()
+        mock_chassis.get_liquid_cooling().leakage_sensors[0].leak_sensor_health = LeakSensorHealth.NA
+
+        liquid_cooling_updater = thermalctld.LiquidCoolingUpdater(mock_chassis, 0.5)
+        liquid_cooling_updater.log_error = mock.MagicMock()
+        liquid_cooling_updater.log_notice = mock.MagicMock()
+        liquid_cooling_updater.sensor_table = mock.MagicMock()
+        liquid_cooling_updater.system_table = mock.MagicMock()
+
+        liquid_cooling_updater._refresh_leak_status()
+
+        calls = liquid_cooling_updater.sensor_table.set.call_args_list
+        fvs = {call[0][0]: call[0][1].fv_dict for call in calls}
+        assert fvs["leakage1"]['leak_sensor_status'] == "N/A"
+        assert fvs["leakage1"]['leaking'] == "No"
+        assert fvs["leakage2"]['leak_sensor_status'] == "Good"
+        assert len(liquid_cooling_updater.faulty_sensors) == 0
+
+    def test_refresh_leak_status_without_health_api(self):
+        """leak_sensor_status falls back to Good/Fault when get_leak_sensor_health is absent"""
+        mock_chassis = MockChassis()
+        sensors = mock_chassis.get_liquid_cooling().leakage_sensors
+        sensors[0].is_leak_sensor_ok = mock.MagicMock(return_value=False)
+        for sensor in sensors:
+            sensor.get_leak_sensor_health = None
+
+        liquid_cooling_updater = thermalctld.LiquidCoolingUpdater(mock_chassis, 0.5)
+        liquid_cooling_updater.log_error = mock.MagicMock()
+        liquid_cooling_updater.log_notice = mock.MagicMock()
+        liquid_cooling_updater.sensor_table = mock.MagicMock()
+        liquid_cooling_updater.system_table = mock.MagicMock()
+
+        liquid_cooling_updater._refresh_leak_status()
+
+        calls = liquid_cooling_updater.sensor_table.set.call_args_list
+        statuses = {call[0][0]: call[0][1].fv_dict['leak_sensor_status'] for call in calls}
+        assert statuses["leakage1"] == "Fault"
+        assert statuses["leakage2"] == "Good"
 
     @mock.patch('thermalctld.try_get')
     def test_refresh_leak_status_fault_recovery(self, mock_try_get):

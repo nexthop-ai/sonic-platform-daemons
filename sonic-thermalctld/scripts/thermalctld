@@ -711,6 +711,10 @@ class LiquidCoolingUpdater(threading.Thread, logger.Logger):
         for index, sensor in enumerate(self.liquid_cooling.leakage_sensors, start = 1):
             sensor_name = try_get(sensor.get_name, 'leakage{}'.format(index))
             sensor_is_ok = sensor.is_leak_sensor_ok()
+            # Tri-state health (OK / FAULT / NA) for reporting only; is_leak_sensor_ok()
+            # still drives fault handling. Absent on older sonic-platform-common.
+            get_health = getattr(sensor, 'get_leak_sensor_health', None)
+            sensor_health = try_get(get_health, None) if get_health else None
             sensor_is_leak = sensor.is_leak()
             sensor_leak_severity = sensor.get_leak_severity()
 
@@ -792,6 +796,12 @@ class LiquidCoolingUpdater(threading.Thread, logger.Logger):
 
             # Per-sensor status. Only write on change to avoid Redis churn.
             leaking = 'N/A' if not sensor_is_ok else 'Yes' if sensor_is_leak else 'No'
+            if not sensor_is_ok:
+                sensor_status = 'Fault'
+            elif sensor_health is not None:
+                sensor_status = sensor_health.value
+            else:
+                sensor_status = 'Good'
             sensor_type = try_get(sensor.get_leak_sensor_type, 'unknown')
             sensor_location = try_get(sensor.get_leak_sensor_location, 'unknown')
             # Add the timestamp to the leak sensor entry to track when leak occured
@@ -803,7 +813,7 @@ class LiquidCoolingUpdater(threading.Thread, logger.Logger):
                 # Add leak_status field for backward compatibility in system-health hardware_checker
                 # and legacy leakageshow CLI which still read 'leak_status'.
                 ('leak_status', leaking),
-                ('leak_sensor_status', 'Good' if sensor_is_ok else 'Fault'),
+                ('leak_sensor_status', sensor_status),
                 ('type', str(sensor_type)),
                 ('location', str(sensor_location)),
                 ('leak_severity', sensor_leak_severity.value if sensor_leak_severity is not None else 'None'),
