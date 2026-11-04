@@ -231,6 +231,30 @@ class TestDaemonPsud(object):
         daemon_psud.psu_tbl.set.assert_called_with('PSU 1', expected_fvp)
         assert not daemon_psud.psu_status_dict['PSU 1'].check_psu_power_threshold
 
+    @mock.patch('psud._wrapper_get_psu_presence', mock.MagicMock(return_value=True))
+    @mock.patch('psud._wrapper_get_psu_status', mock.MagicMock(return_value=True))
+    def test_voltage_warning_prints_range_low_to_high(self):
+        # A PSU that lost its input reads 0 V; the warning gives the valid range as [low, high].
+        psu = MockPsu('PSU 2', 1, True, 'Fake Model', '12345678', '1234')
+        psu._voltage_low_th = 11.589
+        psu._voltage_high_th = 12.808
+        psu.set_voltage(0.0)
+        psud.platform_chassis = MockChassis()
+        psud.platform_chassis._psu_list.append(psu)
+
+        daemon_psud = psud.DaemonPsud(SYSLOG_IDENTIFIER)
+        daemon_psud.psu_tbl = mock.MagicMock()
+        daemon_psud.log_warning = mock.MagicMock()
+        daemon_psud.log_notice = mock.MagicMock()
+        daemon_psud._update_single_psu_data(psu)
+        daemon_psud.log_warning.assert_any_call(
+            'Voltage warning: PSU 2 voltage out of range, current voltage=0.0, valid range=[11.589, 12.808].')
+
+        # Back in range: the warning clears.
+        psu.set_voltage(12.0)
+        daemon_psud._update_single_psu_data(psu)
+        daemon_psud.log_notice.assert_any_call('Voltage warning cleared: PSU 2 voltage is back to normal.')
+
     @mock.patch('psud.datetime')
     @mock.patch('psud.daemon_base.db_connect', mock.MagicMock())
     def test_power_threshold(self, mock_datetime):

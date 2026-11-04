@@ -865,7 +865,7 @@ class DaemonPsud(daemon_base.DaemonBase):
             log_on_status_changed(self, psu_status.voltage_good,
                                   'Voltage warning cleared: {} voltage is back to normal.'.format(name),
                                   'Voltage warning: {} voltage out of range, current voltage={}, valid range=[{}, {}].'.format(
-                                      name, voltage, voltage_high_threshold, voltage_low_threshold)
+                                      name, voltage, voltage_low_threshold, voltage_high_threshold)
                                   )
 
         if presence and psu_status.set_temperature(temperature, temperature_threshold):
