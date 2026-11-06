@@ -195,10 +195,9 @@ class FanType(Enum):
     MODULE = auto()
 
 class FanStatus(logger.Logger):
-    absent_fan_count = 0
-    faulty_fan_count = 0
+    bad_fans = []
 
-    def __init__(self, fan=None, fan_type=FanType.DRAWER):
+    def __init__(self, fan=None, fan_type=FanType.DRAWER, name=""):
         """
         Initializer of FanStatus
         """
@@ -206,6 +205,7 @@ class FanStatus(logger.Logger):
 
         self.fan = fan
         self.fan_type = fan_type
+        self.name = name
         self.presence = True
         self.status = True
         self.under_speed = False
@@ -215,12 +215,11 @@ class FanStatus(logger.Logger):
 
     @classmethod
     def get_bad_fan_count(cls):
-        return cls.absent_fan_count + cls.faulty_fan_count
+        return len(cls.bad_fans)
 
     @classmethod
     def reset_fan_counter(cls):
-        cls.absent_fan_count = 0
-        cls.faulty_fan_count = 0
+        cls.bad_fans = []
 
     def set_presence(self, presence):
         """
@@ -229,7 +228,7 @@ class FanStatus(logger.Logger):
         :return: True if status changed else False
         """
         if not presence and self.fan_type == FanType.DRAWER:
-            FanStatus.absent_fan_count += 1
+            FanStatus.bad_fans.append(self)
 
         if presence == self.presence:
             return False
@@ -244,7 +243,7 @@ class FanStatus(logger.Logger):
         :return: True if status changed else False
         """
         if not status:
-            FanStatus.faulty_fan_count += 1
+            FanStatus.bad_fans.append(self)
 
         if status == self.status:
             return False
@@ -411,9 +410,10 @@ class FanUpdater(logger.Logger):
         self._update_led_color()
 
         bad_fan_count = FanStatus.get_bad_fan_count()
+        bad_fan_names = ", ".join(fan.name for fan in FanStatus.bad_fans)
         if bad_fan_count > 0 and old_bad_fan_count != bad_fan_count:
-            self.log_warning("Insufficient number of working fans warning: {} fan{} not working".format(
-                bad_fan_count, " is" if bad_fan_count == 1 else "s are"
+            self.log_warning("Insufficient number of working fans warning: {} fan{} not working ({})".format(
+                bad_fan_count, " is" if bad_fan_count == 1 else "s are", bad_fan_names
             ))
         elif old_bad_fan_count > 0 and bad_fan_count == 0:
             self.log_notice("Insufficient number of working fans warning cleared: all fans are back to normal")
@@ -457,7 +457,7 @@ class FanUpdater(logger.Logger):
         fan_name = try_get(fan.get_name, '{} fan {}'.format(parent_name, fan_index + 1))
         update_entity_info(self.phy_entity_table, parent_name, fan_name, fan, fan_index + 1)
         if fan_name not in self.fan_status_dict:
-            self.fan_status_dict[fan_name] = FanStatus(fan, fan_type)
+            self.fan_status_dict[fan_name] = FanStatus(fan, fan_type, fan_name)
 
         fan_status = self.fan_status_dict[fan_name]
 
@@ -488,10 +488,14 @@ class FanUpdater(logger.Logger):
 
         if presence and fan_status.set_fault_status(fan_fault_status):
             set_led = True
+            if fan_type == FanType.PSU and not try_get(parent.get_powergood_status, True):
+                fault_log = 'Fan fault warning: {} is not running because {} is out of power'.format(
+                    fan_name, parent_name)
+            else:
+                fault_log = 'Fan fault warning: {} is broken'.format(fan_name)
             self._log_on_status_changed(fan_status.status,
                                         'Fan fault warning cleared: {} is back to normal'.format(fan_name),
-                                        'Fan fault warning: {} is broken'.format(fan_name)
-                                        )
+                                        fault_log)
 
         if presence and fan_status.set_under_speed(is_under_speed):
             set_led = True

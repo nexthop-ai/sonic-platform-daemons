@@ -232,7 +232,7 @@ class TestFanUpdater(object):
         assert fan_updater.log_warning.call_count == 2
         expected_calls = [
             mock.call('Fan removed warning: FanDrawer 0 fan 1 was removed from the system, potential overheat hazard'),
-            mock.call('Insufficient number of working fans warning: 1 fan is not working')
+            mock.call('Insufficient number of working fans warning: 1 fan is not working (FanDrawer 0 fan 1)')
         ]
         assert fan_updater.log_warning.mock_calls == expected_calls
 
@@ -256,7 +256,7 @@ class TestFanUpdater(object):
         assert fan_updater.log_warning.call_count == 2
         expected_calls = [
             mock.call('Fan fault warning: FanDrawer 0 fan 1 is broken'),
-            mock.call('Insufficient number of working fans warning: 1 fan is not working')
+            mock.call('Insufficient number of working fans warning: 1 fan is not working (FanDrawer 0 fan 1)')
         ]
         assert fan_updater.log_warning.mock_calls == expected_calls
 
@@ -321,6 +321,22 @@ class TestFanUpdater(object):
             fan_updater.log_warning.assert_called_with("Failed to update PSU fan status - Exception('Test message')")
         else:
             fan_updater.log_warning.assert_called_with("Failed to update PSU fan status - Exception('Test message',)")
+
+    @pytest.mark.parametrize('psu_power_good, expected', [
+        (False, 'Fan fault warning: PSU 1 fan 1 is not running because PSU 1 is out of power'),
+        (True, 'Fan fault warning: PSU 1 fan 1 is broken'),
+    ])
+    def test_psu_fan_fault_message(self, psu_power_good, expected):
+        chassis = MockChassis()
+        psu = MockPsu()
+        psu.set_status(psu_power_good)
+        fan = MockFan()
+        fan.set_status(False)
+        psu._fan_list.append(fan)
+        chassis._psu_list.append(psu)
+        fan_updater = thermalctld.FanUpdater(chassis, threading.Event())
+        fan_updater.update()
+        assert fan_updater.log_warning.mock_calls[0] == mock.call(expected)
 
     def test_update_module_fans(self):
         chassis = MockChassis()
@@ -1864,7 +1880,7 @@ def test_insufficient_fan_number():
     expected_calls = [
         mock.call('Fan removed warning: FanDrawer 0 fan 1 was removed from the system, potential overheat hazard'),
         mock.call('Fan fault warning: FanDrawer 1 fan 1 is broken'),
-        mock.call('Insufficient number of working fans warning: 2 fans are not working')
+        mock.call('Insufficient number of working fans warning: 2 fans are not working (FanDrawer 0 fan 1, FanDrawer 1 fan 1)')
     ]
     assert fan_updater.log_warning.mock_calls == expected_calls
 
@@ -1872,7 +1888,7 @@ def test_insufficient_fan_number():
     fan_list[0].set_presence(True)
     fan_updater.update()
     assert fan_updater.log_notice.call_count == 1
-    fan_updater.log_warning.assert_called_with('Insufficient number of working fans warning: 1 fan is not working')
+    fan_updater.log_warning.assert_called_with('Insufficient number of working fans warning: 1 fan is not working (FanDrawer 1 fan 1)')
 
     fan_list[1].set_status(True)
     fan_updater.update()
