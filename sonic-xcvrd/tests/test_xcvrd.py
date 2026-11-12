@@ -2652,6 +2652,29 @@ class TestXcvrdScript(object):
         }
         assert observer.port_event_cache == expected_cache
 
+        # Test host_tx_ready true->true with count change (create new observer with host_tx_ready in filter):
+        observer = PortChangeObserver(DEFAULT_NAMESPACE, logger, stop_event,
+                                     port_change_event_handler.handle_port_change_event,
+                                     [{CONFIG_DB: PORT_TABLE, 'FILTER': ['host_tx_ready', 'host_tx_ready_count']}])
+        mock_selectable.pop.side_effect = iter([
+            ('Ethernet0', swsscommon.SET_COMMAND, (('index', '1'), ('host_tx_ready', 'true'), ('host_tx_ready_count', '1'))),
+            (None, None, None)])
+        assert observer.handle_port_update_event()
+        expected_processed_event_count += 1
+
+        # Same count - should not process (duplicate):
+        mock_selectable.pop.side_effect = iter([
+            ('Ethernet0', swsscommon.SET_COMMAND, (('index', '1'), ('host_tx_ready', 'true'), ('host_tx_ready_count', '1'))),
+            (None, None, None)])
+        assert not observer.handle_port_update_event()
+
+        # Count incremented - should process:
+        mock_selectable.pop.side_effect = iter([
+            ('Ethernet0', swsscommon.SET_COMMAND, (('index', '1'), ('host_tx_ready', 'true'), ('host_tx_ready_count', '2'))),
+            (None, None, None)])
+        assert observer.handle_port_update_event()
+        expected_processed_event_count += 1
+
     @patch('swsscommon.swsscommon.Select.addSelectable', MagicMock())
     @patch('swsscommon.swsscommon.SubscriberStateTable')
     @patch('swsscommon.swsscommon.Select.select')
@@ -2916,6 +2939,39 @@ class TestXcvrdScript(object):
                                                   {'host_tx_ready': 'true'}))
         assert task.port_dict['Ethernet2']['host_tx_ready'] == 'true'
 
+<<<<<<< HEAD
+=======
+    def test_CmisManagerTask_transceiver_info_subscription_is_identity_filtered(self):
+        """The TRANSCEIVER_INFO subscription must be filtered to
+        module identity fields so xcvrd's own active_apsel writes dedup at
+        the observer instead of re-triggering provisioning."""
+        port_mapping = PortMapping()
+        stop_event = threading.Event()
+        task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, {1: MagicMock()}, stop_event)
+        task.task_stopping_event.set()
+        with patch('xcvrd.cmis.cmis_manager_task.PortChangeObserver') as mock_observer:
+            task.task_worker()
+            assert mock_observer.call_args.kwargs['port_tbl_map'] == CmisManagerTask.PORT_TBL_MAP
+
+        ti_entry = next(d for d in CmisManagerTask.PORT_TBL_MAP if 'STATE_DB' in d
+                        and d['STATE_DB'] == 'TRANSCEIVER_INFO')
+        fvp = {'active_apsel_hostlane1': '1', 'serial': 'S1', 'type': 'OSFP-8X',
+               'index': '1', 'port_name': 'Ethernet0', 'asic_id': 0, 'op': 'SET'}
+        PortChangeObserver.apply_filter_to_fvp(MagicMock(), ti_entry['FILTER'], fvp)
+        assert 'active_apsel_hostlane1' not in fvp
+        assert fvp['serial'] == 'S1'
+        assert fvp['type'] == 'OSFP-8X'
+
+    def test_CmisManagerTask_port_table_subscription_keeps_host_tx_ready_count(self):
+        pt_entry = next(d for d in CmisManagerTask.PORT_TBL_MAP if 'STATE_DB' in d
+                        and d['STATE_DB'] == 'PORT_TABLE')
+        fvp = {'host_tx_ready': 'true', 'host_tx_ready_count': '3', 'admin_status': 'up',
+               'index': '-1', 'port_name': 'Ethernet0', 'asic_id': 0, 'op': 'SET'}
+        PortChangeObserver.apply_filter_to_fvp(MagicMock(), pt_entry['FILTER'], fvp)
+        assert fvp['host_tx_ready_count'] == '3'
+        assert 'admin_status' not in fvp
+
+>>>>>>> 85b7e02 (NOS-23181: [xcvrd] Re-init CMIS on host_tx_ready bounces using host_tx_ready_count (#298))
     def test_SffManagerTask_handle_port_change_event(self):
         stop_event = threading.Event()
         task = SffManagerTask(DEFAULT_NAMESPACE, stop_event, MagicMock(), helper_logger)

@@ -45,6 +45,24 @@ class CmisManagerTask(threading.Thread):
     CMIS_MODULE_TYPES    = ['QSFP-DD', 'QSFP_DD', 'OSFP', 'OSFP-8X', 'QSFP+C', 'CPO']
     CMIS_MAX_HOST_LANES    = 8
     CMIS_EXPIRATION_BUFFER_MS = 2
+<<<<<<< HEAD
+=======
+    # A delivered TRANSCEIVER_INFO SET always reprovisions the
+    # port, so the subscription is filtered to module identity fields. The
+    # observer dedups value-identical events, which keeps xcvrd's own writes
+    # to this table (active_apsel_hostlane* updates from
+    # post_port_active_apsel_to_db) from coming back around as fresh insertion
+    # events and re-triggering provisioning.
+    PORT_TBL_MAP = [
+        {'CONFIG_DB': swsscommon.CFG_PORT_TABLE_NAME},
+        {'STATE_DB': 'TRANSCEIVER_INFO',
+         'FILTER': ['type', 'hardware_rev', 'serial', 'manufacturer', 'model',
+                    'vendor_date', 'vendor_oui']},
+        # host_tx_ready_count still changes when a false->true bounce lands
+        # between two reads, which the boolean alone would hide.
+        {'STATE_DB': 'PORT_TABLE', 'FILTER': ['host_tx_ready', 'host_tx_ready_count']},
+    ]
+>>>>>>> 85b7e02 (NOS-23181: [xcvrd] Re-init CMIS on host_tx_ready bounces using host_tx_ready_count (#298))
 
     def __init__(self, namespaces, port_mapping, port_obj_dict, main_thread_stop_event, skip_cmis_mgr=False):
         threading.Thread.__init__(self)
