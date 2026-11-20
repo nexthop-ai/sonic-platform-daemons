@@ -318,6 +318,33 @@ def _sum_system_power_from_other_psus_and_pdbs(chassis, entity, system_power):
     return system_power
 
 
+def get_min_psus(logger):
+    """
+    Get the minimum number of PSUs that must deliver power from the platform API
+    :return: The minimum as a positive int, or None if the platform does not define one
+    """
+    get_min_psus_cb = getattr(platform_chassis, 'get_min_psus', None)
+    if get_min_psus_cb is None:
+        return None
+
+    try:
+        value = get_min_psus_cb()
+    except NotImplementedError:
+        return None
+    except Exception as e:
+        logger.log_warning("Failed to get minimum PSU count: {}".format(repr(e)))
+        return None
+
+    if value is None:
+        return None
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        logger.log_warning("Invalid minimum PSU count {!r}; minimum PSU check disabled".format(value))
+        return None
+
+    return value
+
+
 def log_on_status_changed(logger, normal_status, normal_log, abnormal_log):
     """
     Log when any status changed
@@ -574,6 +601,9 @@ class DaemonPsud(daemon_base.DaemonBase):
         self.stop_event = threading.Event()
         self.num_psus = 0
         self.psu_status_dict = {}
+        self.psu_names = set()
+        self.min_psus = None
+        self.min_psus_met = True
         self.chassis_tbl = None
         self.fan_tbl = None
         self.psu_tbl = None
@@ -598,6 +628,10 @@ class DaemonPsud(daemon_base.DaemonBase):
             except Exception as e:
                 self.log_error("Failed to load psuutil: %s" % (str(e)), True)
                 sys.exit(PSUUTIL_LOAD_ERROR)
+
+        self.min_psus = get_min_psus(self)
+        if self.min_psus:
+            self.log_notice("Monitoring minimum PSU count: {} PSUs must deliver power".format(self.min_psus))
 
         # Connect to STATE_DB and create psu/chassis info tables
         try:
@@ -709,6 +743,7 @@ class DaemonPsud(daemon_base.DaemonBase):
 
         self.psu_threshold_exceeded_logged = False
         self.update_psu_data()
+        self._check_min_psus()
         self.update_pdb_data()
         self._update_led_color()
 
@@ -732,6 +767,28 @@ class DaemonPsud(daemon_base.DaemonBase):
                     self.log_warning("Failed to update PSU data - {}".format(e))
         except NotImplementedError:
             pass
+
+    def _check_min_psus(self):
+        if not self.min_psus or not self.psu_names:
+            return
+
+        num_delivering = 0
+        for name in self.psu_names:
+            psu_status = self.psu_status_dict.get(name)
+            if psu_status and psu_status.presence and psu_status.power_good:
+                num_delivering += 1
+
+        min_psus_met = num_delivering >= self.min_psus
+        if min_psus_met == self.min_psus_met:
+            return
+
+        self.min_psus_met = min_psus_met
+        detail = '{} of {} PSUs delivering power, minimum is {}'.format(
+            num_delivering, len(self.psu_names), self.min_psus)
+        if min_psus_met:
+            self.log_notice('PSU count back at minimum: {}'.format(detail))
+        else:
+            self.log_error('PSU count below minimum: {}'.format(detail))
 
     def update_pdb_data(self):
         if not platform_chassis:
@@ -763,6 +820,8 @@ class DaemonPsud(daemon_base.DaemonBase):
         if name == NOT_AVAILABLE:
             idx = getattr(entity, 'index', 'unknown')
             name = '{} {}'.format(label, idx) if isinstance(idx, int) else str(idx)
+        if kind == 'psu':
+            self.psu_names.add(name)
         presence = try_get(entity.get_presence, False)
         power_good = try_get(entity.get_powergood_status, False) if presence else False
         voltage = NOT_AVAILABLE

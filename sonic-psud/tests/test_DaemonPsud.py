@@ -962,3 +962,137 @@ class TestDaemonPsud(object):
         status = daemon_psud.psu_status_dict['PSU 1']
         assert status.check_psu_power_threshold
         assert status.power_exceeded_threshold
+
+    def _make_min_psus_daemon(self, min_psus, num_psus=4, num_pdbs=0):
+        psus = [MockPsu('PSU {}'.format(i + 1), i, True, 'Fake Model', '12345678', '1234') for i in range(num_psus)]
+        pdbs = [MockPsu('PDB {}'.format(i + 1), i, True, 'Fake Model', '12345678', '1234') for i in range(num_pdbs)]
+        psud.platform_chassis = MockChassis()
+        psud.platform_chassis._psu_list = psus
+        psud.platform_chassis._pdb_list = pdbs
+        if min_psus is not None:
+            psud.platform_chassis.get_min_psus = mock.MagicMock(return_value=min_psus)
+        daemon_psud = psud.DaemonPsud(SYSLOG_IDENTIFIER)
+        daemon_psud.psu_tbl = mock.MagicMock()
+        daemon_psud.fan_tbl = mock.MagicMock()
+        daemon_psud.log_error = mock.MagicMock()
+        daemon_psud.log_notice = mock.MagicMock()
+        daemon_psud.log_warning = mock.MagicMock()
+        return daemon_psud, psus, pdbs
+
+    @staticmethod
+    def _poll_min_psus(daemon_psud):
+        daemon_psud.log_error.reset_mock()
+        daemon_psud.log_notice.reset_mock()
+        daemon_psud.update_psu_data()
+        daemon_psud._check_min_psus()
+        daemon_psud.update_pdb_data()
+
+    @staticmethod
+    def _min_psus_logs(log_mock):
+        return [c.args[0] for c in log_mock.call_args_list if c.args[0].startswith('PSU count')]
+
+    def test_get_min_psus(self):
+        log = mock.MagicMock()
+
+        psud.platform_chassis = MockChassis()
+        psud.platform_chassis.get_min_psus = mock.MagicMock(return_value=2)
+        assert psud.get_min_psus(log) == 2
+
+        psud.platform_chassis.get_min_psus = mock.MagicMock(return_value=None)
+        assert psud.get_min_psus(log) is None
+
+        psud.platform_chassis.get_min_psus = mock.MagicMock(side_effect=NotImplementedError)
+        assert psud.get_min_psus(log) is None
+
+        assert log.log_warning.call_count == 0
+
+        psud.platform_chassis.get_min_psus = mock.MagicMock(side_effect=RuntimeError('boom'))
+        assert psud.get_min_psus(log) is None
+        assert log.log_warning.call_count == 1
+
+        for bad in (0, -1, 'two', [2], 2.0, True):
+            log.log_warning.reset_mock()
+            psud.platform_chassis.get_min_psus = mock.MagicMock(return_value=bad)
+            assert psud.get_min_psus(log) is None
+            assert log.log_warning.call_count == 1
+
+    def test_get_min_psus_api_missing(self):
+        log = mock.MagicMock()
+
+        psud.platform_chassis = object()
+        assert psud.get_min_psus(log) is None
+
+        psud.platform_chassis = None
+        assert psud.get_min_psus(log) is None
+
+        assert log.log_warning.call_count == 0
+
+    def test_check_min_psus_not_configured(self):
+        daemon_psud, psus, _ = self._make_min_psus_daemon(None)
+        for psu in psus:
+            psu.set_presence(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+    def test_check_min_psus_transitions(self):
+        daemon_psud, psus, _ = self._make_min_psus_daemon(2)
+
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+        psus[0].set_presence(False)
+        psus[1].set_status(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+        psus[2].set_status(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == [
+            'PSU count below minimum: 1 of 4 PSUs delivering power, minimum is 2']
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+
+        psus[3].set_presence(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+
+        psus[0].set_presence(True)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+        psus[1].set_status(True)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == []
+        assert self._min_psus_logs(daemon_psud.log_notice) == [
+            'PSU count back at minimum: 2 of 4 PSUs delivering power, minimum is 2']
+
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_notice) == []
+
+    def test_check_min_psus_below_min_on_first_run(self):
+        daemon_psud, psus, _ = self._make_min_psus_daemon(2)
+        for psu in psus[:3]:
+            psu.set_presence(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == [
+            'PSU count below minimum: 1 of 4 PSUs delivering power, minimum is 2']
+
+    def test_check_min_psus_ignores_pdbs(self):
+        daemon_psud, psus, pdbs = self._make_min_psus_daemon(2, num_psus=2, num_pdbs=2)
+        self._poll_min_psus(daemon_psud)
+        assert daemon_psud.psu_names == {'PSU 1', 'PSU 2'}
+
+        psus[0].set_status(False)
+        self._poll_min_psus(daemon_psud)
+        assert self._min_psus_logs(daemon_psud.log_error) == [
+            'PSU count below minimum: 1 of 2 PSUs delivering power, minimum is 2']
+
+    def test_check_min_psus_before_first_update(self):
+        daemon_psud, _, _ = self._make_min_psus_daemon(2)
+        daemon_psud._check_min_psus()
+        assert self._min_psus_logs(daemon_psud.log_error) == []
